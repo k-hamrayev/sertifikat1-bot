@@ -17,12 +17,20 @@ from PIL import Image, ImageDraw, ImageFont
 TOKEN = "8668050445:AAGxV-kUSKmoDsyrtCYFvrX6RTEv42E2eUY"
 CHANNEL_USERNAME = "@RMMM_Angor_tumani"
 
-QUESTION_TIME_LIMIT = 15  # ⏱ har bir savol uchun sekund
+QUESTION_TIME_LIMIT = 15  # ⏱ ҳар бир савол учун сония
 
 dp = Dispatcher()
 
-# chat_id -> asyncio.Task (savol uchun ishlayotgan taymer)
+# chat_id -> asyncio.Task (савол учун ишлаётган таймер)
 active_timers: dict[int, asyncio.Task] = {}
+
+# Фойдаланувчилар кесишиб кетишининг олдини олиш учун қулфлар (Locks)
+user_locks: dict[int, asyncio.Lock] = {}
+
+def get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in user_locks:
+        user_locks[user_id] = asyncio.Lock()
+    return user_locks[user_id]
 
 
 class TestState(StatesGroup):
@@ -270,26 +278,27 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 def _cancel_timer(chat_id: int) -> None:
     task = active_timers.pop(chat_id, None)
     if task and not task.done():
-        task.cancel()
+        task.clear = task.cancel() # type: ignore
 
 
-async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int) -> None:
+async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int, user_id: int) -> None:
     try:
         await asyncio.sleep(QUESTION_TIME_LIMIT)
 
-        data = await state.get_data()
-        if data.get("question_index") != expected_index:
-            return
+        async with get_user_lock(user_id):
+            data = await state.get_data()
+            if data.get("question_index") != expected_index:
+                return
 
-        await state.update_data(question_index=expected_index + 1)
+            await state.update_data(question_index=expected_index + 1)
 
-        try:
-            await message.edit_text("⏰ Vaqt tugadi! Keyingi savolga o'tamiz...")
-        except TelegramBadRequest:
-            pass
+            try:
+                await message.edit_text("⏰ Vaqt tugadi! Keyingi savolga o'tamiz...")
+            except TelegramBadRequest:
+                pass
 
-        await asyncio.sleep(1)
-        await send_question(message, state, edit=True)
+            await asyncio.sleep(1)
+            await send_question(message, state, edit=True, user_id=user_id)
 
     except asyncio.CancelledError:
         pass
@@ -353,13 +362,15 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
 
 @dp.callback_query(F.data == "start_test")
 async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TestState.question_index)
-    await state.update_data(question_index=0, score=0)
-    await send_question(callback.message, state, edit=True)
-    await callback.answer()
+    user_id = callback.from_user.id
+    async with get_user_lock(user_id):
+        await state.set_state(TestState.question_index)
+        await state.update_data(question_index=0, score=0)
+        await send_question(callback.message, state, edit=True, user_id=user_id)
+        await callback.answer()
 
 
-async def send_question(message: Message, state: FSMContext, edit: bool = False) -> None:
+async def send_question(message: Message, state: FSMContext, edit: bool = False, user_id: int = 0) -> None:
     data = await state.get_data()
     q_index = data.get("question_index")
 
@@ -390,7 +401,6 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
             try:
                 await message.edit_text(text, reply_markup=keyboard)
             except TelegramBadRequest:
-                # Агар хабар матни ўзгармаган ёки эскирган бўлса, янги хабар юборамиз
                 new_msg = await message.answer(text, reply_markup=keyboard)
                 message = new_msg
         else:
@@ -398,7 +408,7 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
             message = new_msg
 
         timer_task = asyncio.create_task(
-            _question_timeout_watcher(message, state, q_index)
+            _question_timeout_watcher(message, state, q_index, user_id)
         )
         active_timers[message.chat.id] = timer_task
 
@@ -436,29 +446,33 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
 
 @dp.callback_query(F.data.startswith("ans_"))
 async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
-    logging.info(f"process_answer chaqirildi: user={callback.from_user.id}, data={callback.data}")
-    try:
-        _cancel_timer(callback.message.chat.id)
+    user_id = callback.from_user.id
+    logging.info(f"process_answer chaqirildi: user={user_id}, data={callback.data}")
+    
+    # Қулф ёрдамида бир вақтда бир нечта сўров келишининг олдини оламиз
+    async with get_user_lock(user_id):
+        try:
+            _cancel_timer(callback.message.chat.id)
 
-        selected_option = int(callback.data.split("_")[1])
-        data = await state.get_data()
-        q_index = data.get("question_index")
-        score = data.get("score", 0)
+            selected_option = int(callback.data.split("_")[1])
+            data = await state.get_data()
+            q_index = data.get("question_index")
+            score = data.get("score", 0)
 
-        if q_index is None or q_index >= len(QUESTIONS):
-            await callback.answer("Bu savol allaqachon eskirgan. /start bosing.", show_alert=True)
-            return
+            if q_index is None or q_index >= len(QUESTIONS):
+                await callback.answer("Bu savol allaqachon eskirgan. /start bosing.", show_alert=True)
+                return
 
-        q_data = QUESTIONS[q_index]
-        if selected_option == q_data["correct"]:
-            score += 1
+            q_data = QUESTIONS[q_index]
+            if selected_option == q_data["correct"]:
+                score += 1
 
-        await state.update_data(question_index=q_index + 1, score=score)
-        await send_question(callback.message, state, edit=True)
-        await callback.answer()
-    except Exception:
-        logging.exception("process_answer ichida xatolik")
-        await callback.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
+            await state.update_data(question_index=q_index + 1, score=score)
+            await send_question(callback.message, state, edit=True, user_id=user_id)
+            await callback.answer()
+        except Exception:
+            logging.exception("process_answer ichida xatolik")
+            await callback.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
 
 
 @dp.errors()
