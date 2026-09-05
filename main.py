@@ -287,23 +287,91 @@ async def _question_timeout_watcher(message: Message, state: FSMContext, expecte
 
         async with get_user_lock(user_id):
             data = await state.get_data()
+            # Агар бу савол аллақачон алмашиб кетган бўлса, таймер ҳеч нарса қилмайди
             if data.get("question_index") != expected_index:
                 return
 
             await state.update_data(question_index=expected_index + 1)
 
             try:
-                await message.edit_text("⏰ Vaqt tugadi! Keyingi savolga o'tamiz...")
+                # Эски хабарнинг тугмаларини ўчирамиз
+                await message.edit_reply_markup(reply_markup=None)
             except TelegramBadRequest:
                 pass
 
-            await asyncio.sleep(1)
-            await send_question(message, state, edit=True, user_id=user_id)
+            # Янги саволни янги хабар сифатида ёки алоҳида юборамиз
+            await send_question_new(message, state, user_id=user_id)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         logging.error(f"Taymerda xatolik: {e}")
+
+
+# ---------------------------------------------------------------------------
+# ЯНГИ САВОЛ ЮБОРИШ ФУНКЦИЯЛАРИ
+# ---------------------------------------------------------------------------
+async def send_question_new(message: Message, state: FSMContext, user_id: int = 0) -> None:
+    data = await state.get_data()
+    q_index = data.get("question_index")
+
+    _cancel_timer(message.chat.id)
+
+    if q_index is not None and q_index < len(QUESTIONS):
+        q_data = QUESTIONS[q_index]
+
+        text = f"<b>{q_data['question']}</b>\n\n"
+        letters = ["A", "B", "C", "D"]
+        for i, option in enumerate(q_data["options"]):
+            text += f"<b>{letters[i]})</b> {option}\n"
+
+        text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
+        text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
+
+        keyboard_buttons = [
+            [
+                InlineKeyboardButton(text="A", callback_data="ans_0"),
+                InlineKeyboardButton(text="B", callback_data="ans_1"),
+                InlineKeyboardButton(text="C", callback_data="ans_2"),
+                InlineKeyboardButton(text="D", callback_data="ans_3"),
+            ]
+        ]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+        # Ҳар сафар янги саволни янги хабар қилиб юборамиз (бу чалкашишларнинг олдини олади)
+        new_msg = await message.answer(text, reply_markup=keyboard)
+
+        timer_task = asyncio.create_task(
+            _question_timeout_watcher(new_msg, state, q_index, user_id)
+        )
+        active_timers[message.chat.id] = timer_task
+
+    else:
+        score = data.get("score", 0)
+        total = len(QUESTIONS)
+        user_name = message.chat.full_name or "Foydalanuvchi"
+
+        try:
+            await message.answer(
+                f"🎉 <b>Тест якунланди!</b>\n\n"
+                f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
+                f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
+            )
+        except TelegramBadRequest:
+            pass
+
+        cert_path = generate_certificate(user_name)
+        photo = FSInputFile(cert_path)
+
+        await message.answer_photo(
+            photo=photo,
+            caption=f"🏆 Табриклайман, {html.bold(user_name)}!\nСиз сертификатни муваффақиятли қўлга киритдингиз!"
+        )
+
+        if os.path.exists(cert_path):
+            os.remove(cert_path)
+
+        await state.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -364,85 +432,16 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
 async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
     async with get_user_lock(user_id):
-        await state.set_state(TestState.question_index)
-        await state.update_data(question_index=0, score=0)
-        await send_question(callback.message, state, edit=True, user_id=user_id)
-        await callback.answer()
-
-
-async def send_question(message: Message, state: FSMContext, edit: bool = False, user_id: int = 0) -> None:
-    data = await state.get_data()
-    q_index = data.get("question_index")
-
-    _cancel_timer(message.chat.id)
-
-    if q_index is not None and q_index < len(QUESTIONS):
-        q_data = QUESTIONS[q_index]
-
-        text = f"<b>{q_data['question']}</b>\n\n"
-        letters = ["A", "B", "C", "D"]
-        for i, option in enumerate(q_data["options"]):
-            text += f"<b>{letters[i]})</b> {option}\n"
-
-        text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
-        text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
-
-        keyboard_buttons = [
-            [
-                InlineKeyboardButton(text="A", callback_data="ans_0"),
-                InlineKeyboardButton(text="B", callback_data="ans_1"),
-                InlineKeyboardButton(text="C", callback_data="ans_2"),
-                InlineKeyboardButton(text="D", callback_data="ans_3"),
-            ]
-        ]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-        if edit:
-            try:
-                await message.edit_text(text, reply_markup=keyboard)
-            except TelegramBadRequest:
-                new_msg = await message.answer(text, reply_markup=keyboard)
-                message = new_msg
-        else:
-            new_msg = await message.answer(text, reply_markup=keyboard)
-            message = new_msg
-
-        timer_task = asyncio.create_task(
-            _question_timeout_watcher(message, state, q_index, user_id)
-        )
-        active_timers[message.chat.id] = timer_task
-
-    else:
-        score = data.get("score", 0)
-        total = len(QUESTIONS)
-        user_name = message.chat.full_name or "Foydalanuvchi"
-
+        # Эски тугмани ўчириб қўямиз
         try:
-            await message.edit_reply_markup(reply_markup=None)
+            await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        try:
-            await message.answer(
-                f"🎉 <b>Тест якунланди!</b>\n\n"
-                f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
-                f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
-            )
-        except TelegramBadRequest:
-            pass
-
-        cert_path = generate_certificate(user_name)
-        photo = FSInputFile(cert_path)
-
-        await message.answer_photo(
-            photo=photo,
-            caption=f"🏆 Табриклайман, {html.bold(user_name)}!\nСиз сертификатни муваффақиятли қўлга киритдингиз!"
-        )
-
-        if os.path.exists(cert_path):
-            os.remove(cert_path)
-
-        await state.clear()
+        await state.set_state(TestState.question_index)
+        await state.update_data(question_index=0, score=0)
+        await send_question_new(callback.message, state, user_id=user_id)
+        await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("ans_"))
@@ -459,7 +458,6 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             score = data.get("score", 0)
 
             if q_index is None or q_index >= len(QUESTIONS):
-                # Эскирган тугма босилса, бот шунчаки ортиқча хабар чиқармасдан тугмани ўчириб қўяди
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
                 except Exception:
@@ -467,12 +465,18 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Bu test allaqachon yakunlangan.", show_alert=True)
                 return
 
+            # Жавоб босилган заҳоти шу хабардаги тугмаларни ўчириб қўямиз (қайта босиб бўлмайди)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
             q_data = QUESTIONS[q_index]
             if selected_option == q_data["correct"]:
                 score += 1
 
             await state.update_data(question_index=q_index + 1, score=score)
-            await send_question(callback.message, state, edit=True, user_id=user_id)
+            await send_question_new(callback.message, state, user_id=user_id)
             await callback.answer()
         except Exception:
             logging.exception("process_answer ichida xatolik")
