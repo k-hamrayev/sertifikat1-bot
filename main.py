@@ -325,7 +325,6 @@ async def send_question_new(message: Message, state: FSMContext, user_id: int = 
         text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
         text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
 
-        # Ҳар бир тугмага савол индекси қўшиб берилади (ans_variant_index)
         keyboard_buttons = [
             [
                 InlineKeyboardButton(text="A", callback_data=f"ans_0_{q_index}"),
@@ -429,11 +428,20 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
 async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
     async with get_user_lock(user_id):
+        # 1. Тугма қайта босилмаслиги учун уни дарҳол ўчирамиз
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
 
+        # 2. Агар фойдаланувчида аллақачон тест давом этаётган бўлса, янги тест очиб юборилишининг олдини оламиз
+        current_data = await state.get_data()
+        if current_data.get("question_index") is not None:
+            await callback.answer("⚠️ Сизда аллақачон фаол тест давом этмоқда!", show_alert=True)
+            return
+
+        # 3. Эски таймерларни тозалаймиз ва янги тестни бошлаймиз
+        _cancel_timer(callback.message.chat.id)
         await state.set_state(TestState.question_index)
         await state.update_data(question_index=0, score=0)
         await send_question_new(callback.message, state, user_id=user_id)
@@ -448,13 +456,12 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
         try:
             parts = callback.data.split("_")
             selected_option = int(parts[1])
-            btn_question_index = int(parts[2])  # Тугма босилган саволнинг аниқ индекси
+            btn_question_index = int(parts[2])
 
             data = await state.get_data()
             current_q_index = data.get("question_index")
             score = data.get("score", 0)
 
-            # Агар тест аллақачон тугаган бўлса
             if current_q_index is None:
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
@@ -463,7 +470,6 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Бу тест аллақачон якунланган.", show_alert=True)
                 return
 
-            # Агар фойдаланувчи ЭСКИ (аллақачон ўтиб кетган ёки жавоб берилган) саволнинг тугмасини босса:
             if btn_question_index != current_q_index:
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
@@ -472,13 +478,11 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Бу савол учун вақт аллақачон ўтган ёки жавоб берилган!", show_alert=True)
                 return
 
-            # Ҳозирги фаол тугмани ўчирамиз
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
 
-            # Таймерни тўхтатамиз
             _cancel_timer(callback.message.chat.id)
 
             q_data = QUESTIONS[current_q_index]
@@ -490,7 +494,7 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer()
         except Exception:
             logging.exception("process_answer ichida xatolik")
-            await callback.answer("⚠️ Хатолик юз берди, қайта уриниб кўринг.", show_alert=True)
+            await callback.answer()
 
 
 @dp.errors()
