@@ -278,7 +278,7 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 def _cancel_timer(chat_id: int) -> None:
     task = active_timers.pop(chat_id, None)
     if task and not task.done():
-        task.clear = task.cancel() # type: ignore
+        task.cancel()
 
 
 async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int, user_id: int) -> None:
@@ -418,17 +418,18 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False,
         user_name = message.chat.full_name or "Foydalanuvchi"
 
         try:
-            await message.edit_text(
-                f"🎉 <b>Тест якунланди!</b>\n\n"
-                f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
-                f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
-            )
-        except TelegramBadRequest:
+            await message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        try:
             await message.answer(
                 f"🎉 <b>Тест якунланди!</b>\n\n"
                 f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
                 f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
             )
+        except TelegramBadRequest:
+            pass
 
         cert_path = generate_certificate(user_name)
         photo = FSInputFile(cert_path)
@@ -447,9 +448,7 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False,
 @dp.callback_query(F.data.startswith("ans_"))
 async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
-    logging.info(f"process_answer chaqirildi: user={user_id}, data={callback.data}")
     
-    # Қулф ёрдамида бир вақтда бир нечта сўров келишининг олдини оламиз
     async with get_user_lock(user_id):
         try:
             _cancel_timer(callback.message.chat.id)
@@ -460,7 +459,12 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             score = data.get("score", 0)
 
             if q_index is None or q_index >= len(QUESTIONS):
-                await callback.answer("Bu savol allaqachon eskirgan. /start bosing.", show_alert=True)
+                # Эскирган тугма босилса, бот шунчаки ортиқча хабар чиқармасдан тугмани ўчириб қўяди
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await callback.answer("Bu test allaqachon yakunlangan.", show_alert=True)
                 return
 
             q_data = QUESTIONS[q_index]
