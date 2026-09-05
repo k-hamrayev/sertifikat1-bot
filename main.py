@@ -11,6 +11,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ErrorEvent
 from PIL import Image, ImageDraw, ImageFont
 
 TOKEN = "8668050445:AAGxV-kUSKmoDsyrtCYFvrX6RTEv42E2eUY"
@@ -438,21 +439,33 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
 
 @dp.callback_query(F.data.startswith("ans_"))
 async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
-    # Foydalanuvchi vaqtida javob berdi — shu savol uchun taymerni bekor qilamiz
-    _cancel_timer(callback.message.chat.id)
+    logging.info(f"process_answer chaqirildi: user={callback.from_user.id}, data={callback.data}")
+    try:
+        # Foydalanuvchi vaqtida javob berdi — shu savol uchun taymerni bekor qilamiz
+        _cancel_timer(callback.message.chat.id)
 
-    selected_option = int(callback.data.split("_")[1])
-    data = await state.get_data()
-    q_index = data.get("question_index")
-    score = data.get("score")
+        selected_option = int(callback.data.split("_")[1])
+        data = await state.get_data()
+        q_index = data.get("question_index")
+        score = data.get("score")
 
-    q_data = QUESTIONS[q_index]
-    if selected_option == q_data["correct"]:
-        score += 1
+        # Eskirgan / test allaqachon tugagandan keyin bosilgan tugma bo'lsa,
+        # IndexError o'rniga xushmuomalalik bilan javob beramiz.
+        if q_index is None or q_index >= len(QUESTIONS):
+            await callback.answer("Bu savol allaqachon eskirgan. /start bosing.", show_alert=True)
+            return
 
-    await state.update_data(question_index=q_index + 1, score=score)
-    await send_question(callback.message, state, edit=True)
-    await callback.answer()
+        q_data = QUESTIONS[q_index]
+        if selected_option == q_data["correct"]:
+            score += 1
+
+        await state.update_data(question_index=q_index + 1, score=score)
+        await send_question(callback.message, state, edit=True)
+    except Exception:
+        logging.exception("process_answer ichida xatolik")
+        await callback.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
+    else:
+        await callback.answer()
 
 
 async def main() -> None:
