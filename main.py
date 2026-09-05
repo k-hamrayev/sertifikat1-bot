@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import asyncio
 import logging
 import sys
@@ -10,16 +10,24 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramBadRequest
 from PIL import Image, ImageDraw, ImageFont
 
 TOKEN = "8668050445:AAGxV-kUSKmoDsyrtCYFvrX6RTEv42E2eUY"
 CHANNEL_USERNAME = "@RMMM_Angor_tumani"
 
+QUESTION_TIME_LIMIT = 15  # ⏱ har bir savol uchun sekund
+
 dp = Dispatcher()
+
+# chat_id -> asyncio.Task (savol uchun ishlayotgan taymer)
+active_timers: dict[int, asyncio.Task] = {}
+
 
 class TestState(StatesGroup):
     question_index = State()
     score = State()
+
 
 QUESTIONS = [
     {
@@ -174,32 +182,91 @@ QUESTIONS = [
     }
 ]
 
-# Сертификат яратиш функцияси (тўғриланган юқорига кўтарилган ва катта шрифт)
+# ---------------------------------------------------------------------------
+# СЕРТИФИКАТ ГЕНЕРАЦИЯСИ (шрифт тузатилган)
+# ---------------------------------------------------------------------------
+
+# Серверда (одатда Linux) "arial.ttf" топилмайди, шунинг учун default
+# жуда кичик bitmap шрифтга тушиб қолади. Қуйида bold serif шрифтларни
+# кетма-кет синаб кўрамиз (расмдаги "Kamol Hamrayev" ёзувига энг яқини).
+FONT_CANDIDATES = [
+    # Linux серверларда кўп ҳолларда мавжуд bo'ladigan yo'llar
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
+    # Nomi bilan qidirish (fontconfig o'rnatilgan bo'lsa)
+    "DejaVuSerif-Bold.ttf",
+    "LiberationSerif-Bold.ttf",
+    # Windows'da ishga tushirilsa
+    "timesbd.ttf",
+    "arialbd.ttf",
+    "arial.ttf",
+]
+
+CERT_BG_PATH = "certificate_bg.jpg"
+CERT_TEXT_COLOR = "#111827"
+CERT_MAX_TEXT_WIDTH_RATIO = 0.62  # ismning rasm kengligiga nisbatan max eni
+CERT_BASE_FONT_SIZE = 65
+CERT_MIN_FONT_SIZE = 30
+CERT_TEXT_Y_RATIO = 0.53
+
+
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    # Pillow >= 10 default shriftga o'lcham berish imkonini beradi
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        logging.warning(
+            "Bold serif shrift topilmadi — default (kichik) shriftdan foydalanilmoqda. "
+            "Serverga fontlarni o'rnating: sudo apt install fonts-dejavu-core fonts-liberation"
+        )
+        return ImageFont.load_default()
+
+
 def generate_certificate(user_name: str) -> str:
     cert_filename = f"cert_{user_name.replace(' ', '_')}.png"
-    
-    if os.path.exists("certificate_bg.jpg"):
-        img = Image.open("certificate_bg.jpg").convert("RGB")
+
+    if os.path.exists(CERT_BG_PATH):
+        img = Image.open(CERT_BG_PATH).convert("RGB")
     else:
         img = Image.new("RGB", (1200, 850), color=(255, 255, 255))
-    
+
     draw = ImageDraw.Draw(img)
     width, height = img.size
-    
-    try:
-        # Шрифт ўлчами 65 га оширилди (хоҳласангиз 70 қилишингиз ҳам мумкин)
-        font_name = ImageFont.truetype("arial.ttf", 65)
-    except:
-        font_name = ImageFont.load_default()
+
+    max_width_px = width * CERT_MAX_TEXT_WIDTH_RATIO
+    font_size = CERT_BASE_FONT_SIZE
+    font = _load_font(font_size)
+
+    # Ism uzun bo'lsa, oltin ramkadan chiqib ketmasligi uchun
+    # shrift o'lchamini avtomatik kichraytiramiz.
+    while font_size > CERT_MIN_FONT_SIZE:
+        bbox = draw.textbbox((0, 0), user_name, font=font)
+        text_width = bbox[2] - bbox[0]
+        if text_width <= max_width_px:
+            break
+        font_size -= 2
+        font = _load_font(font_size)
 
     text_x = width / 2
-    # Сариқ чизиқдан юқорига кўтариш учун 0.61 ни камайтирамиз (масалан, 0.54 ёки 0.53 қиламиз)
-    text_y = height * 0.53  
-    
-    draw.text((text_x, text_y), user_name, fill="#111827", anchor="mm", font=font_name)
-    
+    text_y = height * CERT_TEXT_Y_RATIO
+
+    draw.text((text_x, text_y), user_name, fill=CERT_TEXT_COLOR, anchor="mm", font=font)
+
     img.save(cert_filename)
     return cert_filename
+
+
+# ---------------------------------------------------------------------------
+# ОБУНАНИ ТЕКШИРИШ
+# ---------------------------------------------------------------------------
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
@@ -210,11 +277,54 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
         logging.error(f"Обунани текширишда хатолик: {e}")
     return False
 
+
+# ---------------------------------------------------------------------------
+# ТАЙМЕР БОШҚАРУВИ (ҳар бир савол учун 15 сония)
+# ---------------------------------------------------------------------------
+
+def _cancel_timer(chat_id: int) -> None:
+    task = active_timers.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int) -> None:
+    """expected_index savoli hali javobsiz qolsa, QUESTION_TIME_LIMIT sekunddan so'ng
+    avtomatik keyingi savolga o'tkazadi (noto'g'ri javob sifatida hisoblanadi)."""
+    try:
+        await asyncio.sleep(QUESTION_TIME_LIMIT)
+
+        data = await state.get_data()
+        if data.get("question_index") != expected_index:
+            # Foydalanuvchi allaqachon javob bergan / holat o'zgargan
+            return
+
+        await state.update_data(question_index=expected_index + 1)
+
+        try:
+            await message.edit_text("⏰ Vaqt tugadi! Keyingi savolga o'tamiz...")
+        except TelegramBadRequest:
+            pass
+
+        await asyncio.sleep(1)
+        await send_question(message, state, edit=True)
+
+    except asyncio.CancelledError:
+        # Foydalanuvchi vaqtida javob berdi — taymer bekor qilindi
+        pass
+    except Exception as e:
+        logging.error(f"Taymerda xatolik: {e}")
+
+
+# ---------------------------------------------------------------------------
+# ХЕНДЛЕРЛАР
+# ---------------------------------------------------------------------------
+
 @dp.message(CommandStart())
 async def command_start_handler(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
     is_subscribed = await check_subscription(bot, user_id)
-    
+
     if not is_subscribed:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📢 Каналга обуна бўлиш", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")],
@@ -231,16 +341,18 @@ async def command_start_handler(message: Message, bot: Bot) -> None:
         ])
         await message.answer(
             f"Салом, {html.bold(user_name)}! Ангор тумани тарих тест ботига хуш келибсиз. 🚀\n"
-            f"Бу ерда сизни Ўзбекистон тарихидан 15 та тест кутмоқда ва юқори натижа учун шахсий сертификат берилади!\n\n"
+            f"Бу ерда сизни Ўзбекистон тарихидан 15 та тест кутмоқда ва юқори натижа учун шахсий сертификат берилади!\n"
+            f"⏱ Ҳар бир саволга {QUESTION_TIME_LIMIT} сониядан вақт берилади.\n\n"
             f"Тайёр бўлсангиз тугмани босинг:",
             reply_markup=keyboard
         )
+
 
 @dp.callback_query(F.data == "check_sub")
 async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
     is_subscribed = await check_subscription(bot, user_id)
-    
+
     if is_subscribed:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Тестни бошлаш", callback_data="start_test")]
@@ -252,26 +364,32 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
     else:
         await callback.answer("❌ Сиз ҳали каналга обуна бўлмадингиз!", show_alert=True)
 
+
 @dp.callback_query(F.data == "start_test")
 async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestState.question_index)
     await state.update_data(question_index=0, score=0)
     await send_question(callback.message, state, edit=True)
 
+
 async def send_question(message: Message, state: FSMContext, edit: bool = False) -> None:
     data = await state.get_data()
     q_index = data.get("question_index")
-    
+
+    # Har safar yangi savol chiqarilganda avvalgi taymerni bekor qilamiz
+    _cancel_timer(message.chat.id)
+
     if q_index < len(QUESTIONS):
         q_data = QUESTIONS[q_index]
-        
+
         text = f"<b>{q_data['question']}</b>\n\n"
         letters = ["A", "B", "C", "D"]
         for i, option in enumerate(q_data["options"]):
             text += f"<b>{letters[i]})</b> {option}\n"
-        
+
+        text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
         text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
-        
+
         keyboard_buttons = [
             [
                 InlineKeyboardButton(text="A", callback_data="ans_0"),
@@ -281,53 +399,66 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
             ]
         ]
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        
+
         if edit:
             await message.edit_text(text, reply_markup=keyboard)
         else:
             await message.answer(text, reply_markup=keyboard)
+
+        # Shu savol uchun 15 soniyalik taymerni ishga tushiramiz
+        timer_task = asyncio.create_task(
+            _question_timeout_watcher(message, state, q_index)
+        )
+        active_timers[message.chat.id] = timer_task
+
     else:
         score = data.get("score")
         total = len(QUESTIONS)
         user_name = message.chat.full_name or "Foydalanuvchi"
-        
+
         await message.edit_text(
             f"🎉 <b>Тест якунланди!</b>\n\n"
             f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
             f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
         )
-        
+
         cert_path = generate_certificate(user_name)
         photo = FSInputFile(cert_path)
-        
+
         await message.answer_photo(
             photo=photo,
             caption=f"🏆 Табриклайман, {html.bold(user_name)}!\nСиз сертификатни муваффақиятли қўлга киритдингиз!"
         )
-        
+
         if os.path.exists(cert_path):
             os.remove(cert_path)
-            
+
         await state.clear()
+
 
 @dp.callback_query(F.data.startswith("ans_"))
 async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
+    # Foydalanuvchi vaqtida javob berdi — shu savol uchun taymerni bekor qilamiz
+    _cancel_timer(callback.message.chat.id)
+
     selected_option = int(callback.data.split("_")[1])
     data = await state.get_data()
     q_index = data.get("question_index")
     score = data.get("score")
-    
+
     q_data = QUESTIONS[q_index]
     if selected_option == q_data["correct"]:
         score += 1
-    
+
     await state.update_data(question_index=q_index + 1, score=score)
     await send_question(callback.message, state, edit=True)
     await callback.answer()
 
+
 async def main() -> None:
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
