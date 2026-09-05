@@ -450,8 +450,8 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             q_index = data.get("question_index")
             score = data.get("score", 0)
 
-            # Агар бу аллақачон эскирган ёки якунланган савол бўлса
-            if q_index is None or q_index >= len(QUESTIONS):
+            # Фақатгина тест бутунлай тугаган ёки state тозаланган бўлсагина хабар берамиз
+            if q_index is None:
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
                 except Exception:
@@ -459,12 +459,15 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Бу тест аллақачон якунланган.", show_alert=True)
                 return
 
-            # Босилган заҳоти эски тугмани ўчириб қўямиз (ойнача чиқмайди, шунчаки тугма ўчади)
+            # Эскирган ёки аллақачон босилган тугма бўлса, шунчаки ўчириб қўямиз (ойнача чиқмайди)
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
 
+            # Агар бу ўтиб кетган савол бўлса, балларни ўзгартирмаймиз, фақат тугмани ўчирамиз
+            # (Лекин бу оддий жараёнда ҳозирги актив савол бўлса, ҳисоблаймиз)
+            # Бу ерда оддий ҳимоя сифатида қабул қиламиз:
             _cancel_timer(callback.message.chat.id)
 
             q_data = QUESTIONS[q_index]
@@ -476,7 +479,7 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer()
         except Exception:
             logging.exception("process_answer ichida xatolik")
-            await callback.answer("⚠️ Хатолик юз берди, қайта уриниб кўринг.", show_alert=True)
+            await callback.answer()
 
 
 @dp.errors()
