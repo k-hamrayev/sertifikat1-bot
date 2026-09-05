@@ -184,23 +184,16 @@ QUESTIONS = [
 ]
 
 # ---------------------------------------------------------------------------
-# СЕРТИФИКАТ ГЕНЕРАЦИЯСИ (шрифт тузатилган)
+# СЕРТИФИКАТ ГЕНЕРАЦИЯСИ
 # ---------------------------------------------------------------------------
-
-# Серверда (одатда Linux) "arial.ttf" топилмайди, шунинг учун default
-# жуда кичик bitmap шрифтга тушиб қолади. Қуйида bold serif шрифтларни
-# кетма-кет синаб кўрамиз (расмдаги "Kamol Hamrayev" ёзувига энг яқини).
 FONT_CANDIDATES = [
-    # Linux серверларда кўп ҳолларда мавжуд bo'ladigan yo'llar
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
     "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
     "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
-    # Nomi bilan qidirish (fontconfig o'rnatilgan bo'lsa)
     "DejaVuSerif-Bold.ttf",
     "LiberationSerif-Bold.ttf",
-    # Windows'da ishga tushirilsa
     "timesbd.ttf",
     "arialbd.ttf",
     "arial.ttf",
@@ -208,7 +201,7 @@ FONT_CANDIDATES = [
 
 CERT_BG_PATH = "certificate_bg.jpg"
 CERT_TEXT_COLOR = "#111827"
-CERT_MAX_TEXT_WIDTH_RATIO = 0.62  # ismning rasm kengligiga nisbatan max eni
+CERT_MAX_TEXT_WIDTH_RATIO = 0.62 
 CERT_BASE_FONT_SIZE = 65
 CERT_MIN_FONT_SIZE = 30
 CERT_TEXT_Y_RATIO = 0.53
@@ -220,14 +213,9 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
             return ImageFont.truetype(path, size)
         except Exception:
             continue
-    # Pillow >= 10 default shriftga o'lcham berish imkonini beradi
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
-        logging.warning(
-            "Bold serif shrift topilmadi — default (kichik) shriftdan foydalanilmoqda. "
-            "Serverga fontlarni o'rnating: sudo apt install fonts-dejavu-core fonts-liberation"
-        )
         return ImageFont.load_default()
 
 
@@ -246,8 +234,6 @@ def generate_certificate(user_name: str) -> str:
     font_size = CERT_BASE_FONT_SIZE
     font = _load_font(font_size)
 
-    # Ism uzun bo'lsa, oltin ramkadan chiqib ketmasligi uchun
-    # shrift o'lchamini avtomatik kichraytiramiz.
     while font_size > CERT_MIN_FONT_SIZE:
         bbox = draw.textbbox((0, 0), user_name, font=font)
         text_width = bbox[2] - bbox[0]
@@ -268,7 +254,6 @@ def generate_certificate(user_name: str) -> str:
 # ---------------------------------------------------------------------------
 # ОБУНАНИ ТЕКШИРИШ
 # ---------------------------------------------------------------------------
-
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
@@ -280,9 +265,8 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# ТАЙМЕР БОШҚАРУВИ (ҳар бир савол учун 15 сония)
+# ТАЙМЕР БОШҚАРУВИ
 # ---------------------------------------------------------------------------
-
 def _cancel_timer(chat_id: int) -> None:
     task = active_timers.pop(chat_id, None)
     if task and not task.done():
@@ -290,14 +274,11 @@ def _cancel_timer(chat_id: int) -> None:
 
 
 async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int) -> None:
-    """expected_index savoli hali javobsiz qolsa, QUESTION_TIME_LIMIT sekunddan so'ng
-    avtomatik keyingi savolga o'tkazadi (noto'g'ri javob sifatida hisoblanadi)."""
     try:
         await asyncio.sleep(QUESTION_TIME_LIMIT)
 
         data = await state.get_data()
         if data.get("question_index") != expected_index:
-            # Foydalanuvchi allaqachon javob bergan / holat o'zgargan
             return
 
         await state.update_data(question_index=expected_index + 1)
@@ -311,7 +292,6 @@ async def _question_timeout_watcher(message: Message, state: FSMContext, expecte
         await send_question(message, state, edit=True)
 
     except asyncio.CancelledError:
-        # Foydalanuvchi vaqtida javob berdi — taymer bekor qilindi
         pass
     except Exception as e:
         logging.error(f"Taymerda xatolik: {e}")
@@ -320,7 +300,6 @@ async def _question_timeout_watcher(message: Message, state: FSMContext, expecte
 # ---------------------------------------------------------------------------
 # ХЕНДЛЕРЛАР
 # ---------------------------------------------------------------------------
-
 @dp.message(CommandStart())
 async def command_start_handler(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
@@ -358,10 +337,16 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚀 Тестни бошлаш", callback_data="start_test")]
         ])
-        await callback.message.edit_text(
-            "Раҳмат! Сиз каналга обуна бўлдингиз. ✅\nЭнди тестни бошлашингиз мумкин.",
-            reply_markup=keyboard
-        )
+        try:
+            await callback.message.edit_text(
+                "Раҳмат! Сиз каналга обуна бўлдингиз. ✅\nЭнди тестни бошлашингиз мумкин.",
+                reply_markup=keyboard
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                "Раҳмат! Сиз каналга обуна бўлдингиз. ✅\nЭнди тестни бошлашингиз мумкин.",
+                reply_markup=keyboard
+            )
     else:
         await callback.answer("❌ Сиз ҳали каналга обуна бўлмадингиз!", show_alert=True)
 
@@ -371,16 +356,16 @@ async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestState.question_index)
     await state.update_data(question_index=0, score=0)
     await send_question(callback.message, state, edit=True)
+    await callback.answer()
 
 
 async def send_question(message: Message, state: FSMContext, edit: bool = False) -> None:
     data = await state.get_data()
     q_index = data.get("question_index")
 
-    # Har safar yangi savol chiqarilganda avvalgi taymerni bekor qilamiz
     _cancel_timer(message.chat.id)
 
-    if q_index < len(QUESTIONS):
+    if q_index is not None and q_index < len(QUESTIONS):
         q_data = QUESTIONS[q_index]
 
         text = f"<b>{q_data['question']}</b>\n\n"
@@ -402,26 +387,38 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
         if edit:
-            await message.edit_text(text, reply_markup=keyboard)
+            try:
+                await message.edit_text(text, reply_markup=keyboard)
+            except TelegramBadRequest:
+                # Агар хабар матни ўзгармаган ёки эскирган бўлса, янги хабар юборамиз
+                new_msg = await message.answer(text, reply_markup=keyboard)
+                message = new_msg
         else:
-            await message.answer(text, reply_markup=keyboard)
+            new_msg = await message.answer(text, reply_markup=keyboard)
+            message = new_msg
 
-        # Shu savol uchun 15 soniyalik taymerni ishga tushiramiz
         timer_task = asyncio.create_task(
             _question_timeout_watcher(message, state, q_index)
         )
         active_timers[message.chat.id] = timer_task
 
     else:
-        score = data.get("score")
+        score = data.get("score", 0)
         total = len(QUESTIONS)
         user_name = message.chat.full_name or "Foydalanuvchi"
 
-        await message.edit_text(
-            f"🎉 <b>Тест якунланди!</b>\n\n"
-            f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
-            f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
-        )
+        try:
+            await message.edit_text(
+                f"🎉 <b>Тест якунланди!</b>\n\n"
+                f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
+                f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
+            )
+        except TelegramBadRequest:
+            await message.answer(
+                f"🎉 <b>Тест якунланди!</b>\n\n"
+                f"Сизнинг натижангиз: <b>{score} / {total}</b> та тўғри жавоб.\n\n"
+                f"🏆 Мана сизнинг шахсий сертификатингиз тайёрланмоқда..."
+            )
 
         cert_path = generate_certificate(user_name)
         photo = FSInputFile(cert_path)
@@ -441,16 +438,13 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
 async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
     logging.info(f"process_answer chaqirildi: user={callback.from_user.id}, data={callback.data}")
     try:
-        # Foydalanuvchi vaqtida javob berdi — shu savol uchun taymerni bekor qilamiz
         _cancel_timer(callback.message.chat.id)
 
         selected_option = int(callback.data.split("_")[1])
         data = await state.get_data()
         q_index = data.get("question_index")
-        score = data.get("score")
+        score = data.get("score", 0)
 
-        # Eskirgan / test allaqachon tugagandan keyin bosilgan tugma bo'lsa,
-        # IndexError o'rniga xushmuomalalik bilan javob beramiz.
         if q_index is None or q_index >= len(QUESTIONS):
             await callback.answer("Bu savol allaqachon eskirgan. /start bosing.", show_alert=True)
             return
@@ -461,15 +455,24 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
 
         await state.update_data(question_index=q_index + 1, score=score)
         await send_question(callback.message, state, edit=True)
+        await callback.answer()
     except Exception:
         logging.exception("process_answer ichida xatolik")
         await callback.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
-    else:
-        await callback.answer()
+
+
+@dp.errors()
+async def global_error_handler(event: ErrorEvent) -> bool:
+    logging.exception(
+        f"Global xatolik: update={event.update.model_dump_json(exclude_none=True)}",
+        exc_info=event.exception,
+    )
+    return True
 
 
 async def main() -> None:
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
