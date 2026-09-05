@@ -287,19 +287,16 @@ async def _question_timeout_watcher(message: Message, state: FSMContext, expecte
 
         async with get_user_lock(user_id):
             data = await state.get_data()
-            # Агар бу савол аллақачон алмашиб кетган бўлса, таймер ҳеч нарса қилмайди
             if data.get("question_index") != expected_index:
                 return
 
             await state.update_data(question_index=expected_index + 1)
 
             try:
-                # Эски хабарнинг тугмаларини ўчирамиз
                 await message.edit_reply_markup(reply_markup=None)
             except TelegramBadRequest:
                 pass
 
-            # Янги саволни янги хабар сифатида ёки алоҳида юборамиз
             await send_question_new(message, state, user_id=user_id)
 
     except asyncio.CancelledError:
@@ -338,7 +335,6 @@ async def send_question_new(message: Message, state: FSMContext, user_id: int = 
         ]
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
-        # Ҳар сафар янги саволни янги хабар қилиб юборамиз (бу чалкашишларнинг олдини олади)
         new_msg = await message.answer(text, reply_markup=keyboard)
 
         timer_task = asyncio.create_task(
@@ -432,7 +428,6 @@ async def process_check_sub(callback: CallbackQuery, bot: Bot) -> None:
 async def start_test(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
     async with get_user_lock(user_id):
-        # Эски тугмани ўчириб қўямиз
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
@@ -450,26 +445,27 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
     
     async with get_user_lock(user_id):
         try:
-            _cancel_timer(callback.message.chat.id)
-
             selected_option = int(callback.data.split("_")[1])
             data = await state.get_data()
             q_index = data.get("question_index")
             score = data.get("score", 0)
 
+            # Агар бу аллақачон эскирган ёки якунланган савол бўлса
             if q_index is None or q_index >= len(QUESTIONS):
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
                 except Exception:
                     pass
-                await callback.answer("Bu test allaqachon yakunlangan.", show_alert=True)
+                await callback.answer("Бу тест аллақачон якунланган.", show_alert=True)
                 return
 
-            # Жавоб босилган заҳоти шу хабардаги тугмаларни ўчириб қўямиз (қайта босиб бўлмайди)
+            # Босилган заҳоти эски тугмани ўчириб қўямиз (ойнача чиқмайди, шунчаки тугма ўчади)
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
+
+            _cancel_timer(callback.message.chat.id)
 
             q_data = QUESTIONS[q_index]
             if selected_option == q_data["correct"]:
@@ -480,7 +476,7 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer()
         except Exception:
             logging.exception("process_answer ichida xatolik")
-            await callback.answer("⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
+            await callback.answer("⚠️ Хатолик юз берди, қайта уриниб кўринг.", show_alert=True)
 
 
 @dp.errors()
