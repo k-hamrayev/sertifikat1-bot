@@ -325,12 +325,13 @@ async def send_question_new(message: Message, state: FSMContext, user_id: int = 
         text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
         text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
 
+        # Ҳар бир тугмага савол индекси қўшиб берилади (ans_variant_index)
         keyboard_buttons = [
             [
-                InlineKeyboardButton(text="A", callback_data="ans_0"),
-                InlineKeyboardButton(text="B", callback_data="ans_1"),
-                InlineKeyboardButton(text="C", callback_data="ans_2"),
-                InlineKeyboardButton(text="D", callback_data="ans_3"),
+                InlineKeyboardButton(text="A", callback_data=f"ans_0_{q_index}"),
+                InlineKeyboardButton(text="B", callback_data=f"ans_1_{q_index}"),
+                InlineKeyboardButton(text="C", callback_data=f"ans_2_{q_index}"),
+                InlineKeyboardButton(text="D", callback_data=f"ans_3_{q_index}"),
             ]
         ]
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
@@ -445,13 +446,16 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
     
     async with get_user_lock(user_id):
         try:
-            selected_option = int(callback.data.split("_")[1])
+            parts = callback.data.split("_")
+            selected_option = int(parts[1])
+            btn_question_index = int(parts[2])  # Тугма босилган саволнинг аниқ индекси
+
             data = await state.get_data()
-            q_index = data.get("question_index")
+            current_q_index = data.get("question_index")
             score = data.get("score", 0)
 
-            # Фақатгина тест бутунлай тугаган ёки state тозаланган бўлсагина хабар берамиз
-            if q_index is None:
+            # Агар тест аллақачон тугаган бўлса
+            if current_q_index is None:
                 try:
                     await callback.message.edit_reply_markup(reply_markup=None)
                 except Exception:
@@ -459,27 +463,34 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Бу тест аллақачон якунланган.", show_alert=True)
                 return
 
-            # Эскирган ёки аллақачон босилган тугма бўлса, шунчаки ўчириб қўямиз (ойнача чиқмайди)
+            # Агар фойдаланувчи ЭСКИ (аллақачон ўтиб кетган ёки жавоб берилган) саволнинг тугмасини босса:
+            if btn_question_index != current_q_index:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await callback.answer("Бу савол учун вақт аллақачон ўтган ёки жавоб берилган!", show_alert=True)
+                return
+
+            # Ҳозирги фаол тугмани ўчирамиз
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
 
-            # Агар бу ўтиб кетган савол бўлса, балларни ўзгартирмаймиз, фақат тугмани ўчирамиз
-            # (Лекин бу оддий жараёнда ҳозирги актив савол бўлса, ҳисоблаймиз)
-            # Бу ерда оддий ҳимоя сифатида қабул қиламиз:
+            # Таймерни тўхтатамиз
             _cancel_timer(callback.message.chat.id)
 
-            q_data = QUESTIONS[q_index]
+            q_data = QUESTIONS[current_q_index]
             if selected_option == q_data["correct"]:
                 score += 1
 
-            await state.update_data(question_index=q_index + 1, score=score)
+            await state.update_data(question_index=current_q_index + 1, score=score)
             await send_question_new(callback.message, state, user_id=user_id)
             await callback.answer()
         except Exception:
             logging.exception("process_answer ichida xatolik")
-            await callback.answer()
+            await callback.answer("⚠️ Хатолик юз берди, қайта уриниб кўринг.", show_alert=True)
 
 
 @dp.errors()
