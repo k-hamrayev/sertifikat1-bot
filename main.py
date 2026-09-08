@@ -16,7 +16,12 @@ from PIL import Image, ImageDraw, ImageFont
 TOKEN = "8668050445:AAGxV-kUSKmoDsyrtCYFvrX6RTEv42E2eUY"
 CHANNEL_USERNAME = "@RMMM_Angor_tumani"
 
+QUESTION_TIME_LIMIT = 10  # ⏱ har bir savol uchun sekund
+
 dp = Dispatcher()
+
+# chat_id -> asyncio.Task (savol uchun ishlayotgan taymer)
+active_timers: dict[int, asyncio.Task] = {}
 
 
 class TestState(StatesGroup):
@@ -265,6 +270,51 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ТАЙМЕР БОШҚАРУВИ (ҳар бир савол учун 10 сония)
+# ---------------------------------------------------------------------------
+
+def _cancel_timer(chat_id: int) -> None:
+    task = active_timers.pop(chat_id, None)
+    if task and not task.done():
+        # MUHIM: taymer tugagach o'zi send_question() ni chaqiradi, u esa
+        # navbatdagi savol uchun yana shu funksiyani chaqirishi mumkin.
+        # Agar shu joyda tekshiruv bo'lmasa, taymer o'zini-o'zi cancel()
+        # qilib qo'yadi va CancelledError chiqib, bot keyingi savolga
+        # o'tmay qotib qoladi. Shuning uchun joriy ishlayotgan taskni
+        # hech qachon o'zi bekor qilmaydi.
+        if task is asyncio.current_task():
+            return
+        task.cancel()
+
+
+async def _question_timeout_watcher(message: Message, state: FSMContext, expected_index: int) -> None:
+    """expected_index savoli hali javobsiz qolsa, QUESTION_TIME_LIMIT sekunddan so'ng
+    avtomatik keyingi savolga o'tkazadi (noto'g'ri javob sifatida hisoblanadi)."""
+    try:
+        await asyncio.sleep(QUESTION_TIME_LIMIT)
+
+        data = await state.get_data()
+        if data.get("question_index") != expected_index:
+            # Foydalanuvchi allaqachon javob bergan / holat o'zgargan
+            return
+
+        await state.update_data(question_index=expected_index + 1)
+
+        try:
+            await message.edit_text("⏰ Vaqt tugadi! Keyingi savolga o'tamiz...")
+        except TelegramBadRequest:
+            pass
+
+        await asyncio.sleep(1)
+        await send_question(message, state, edit=True)
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logging.error(f"Taymerda xatolik: {e}")
+
+
+# ---------------------------------------------------------------------------
 # ХЕНДЛЕРЛАР
 # ---------------------------------------------------------------------------
 
@@ -289,7 +339,8 @@ async def command_start_handler(message: Message, bot: Bot) -> None:
         ])
         await message.answer(
             f"Салом, {html.bold(user_name)}! Ангор тумани тарих тест ботига хуш келибсиз. 🚀\n"
-            f"Бу ерда сизни Ўзбекистон тарихидан 15 та тест кутмоқда ва юқори натижа учун шахсий сертификат берилади!\n\n"
+            f"Бу ерда сизни Ўзбекистон тарихидан 15 та тест кутмоқда ва юқори натижа учун шахсий сертификат берилади!\n"
+            f"⏱ Ҳар бир саволга {QUESTION_TIME_LIMIT} сониядан вақт берилади.\n\n"
             f"Тайёр бўлсангиз тугмани босинг:",
             reply_markup=keyboard
         )
@@ -324,6 +375,10 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
     data = await state.get_data()
     q_index = data.get("question_index")
 
+    # Har safar yangi savol chiqarilganda avvalgi taymerni bekor qilamiz
+    # (o'zini-o'zi bekor qilishdan _cancel_timer ichida himoyalangan)
+    _cancel_timer(message.chat.id)
+
     if q_index < len(QUESTIONS):
         q_data = QUESTIONS[q_index]
 
@@ -332,6 +387,7 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
         for i, option in enumerate(q_data["options"]):
             text += f"<b>{letters[i]})</b> {option}\n"
 
+        text += f"\n⏱ <i>{QUESTION_TIME_LIMIT} soniya ichida javob bering!</i>"
         text += f"\n<i>(Савол {q_index + 1} / {len(QUESTIONS)})</i>"
 
         # MUHIM: callback_data ichiga shu savolning o'z indeksi ("token")
@@ -358,6 +414,12 @@ async def send_question(message: Message, state: FSMContext, edit: bool = False)
             # "message is not modified" va shunga o'xshash xatoliklarni
             # e'tiborsiz qoldiramiz — bot yiqilib qolmasligi uchun.
             logging.warning(f"edit_text xatoligi (e'tiborsiz qoldirildi): {e}")
+
+        # Shu savol uchun taymerni ishga tushiramiz
+        timer_task = asyncio.create_task(
+            _question_timeout_watcher(message, state, q_index)
+        )
+        active_timers[message.chat.id] = timer_task
 
     else:
         score = data.get("score")
@@ -402,11 +464,14 @@ async def process_answer(callback: CallbackQuery, state: FSMContext) -> None:
     q_index = data.get("question_index")
 
     # Agar tugma bosilgan savol hozirgi (joriy) savol bilan mos kelmasa —
-    # bu eski/qayta yuborilgan tugma bosilishi (masalan, foydalanuvchi
-    # eski xabardagi tugmani bossa). Hisobni buzmasdan e'tiborsiz qoldiramiz.
+    # bu eski/qayta yuborilgan tugma bosilishi (masalan, vaqt tugab savol
+    # allaqachon almashtirilgan). Hisobni buzmasdan e'tiborsiz qoldiramiz.
     if q_index is None or answer_token != q_index:
         await callback.answer("Bu savol allaqachon eskirgan.", show_alert=True)
         return
+
+    # Foydalanuvchi vaqtida javob berdi — shu savol uchun taymerni bekor qilamiz
+    _cancel_timer(callback.message.chat.id)
 
     score = data.get("score")
     q_data = QUESTIONS[q_index]
