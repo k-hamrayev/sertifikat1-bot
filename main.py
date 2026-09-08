@@ -276,6 +276,14 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 def _cancel_timer(chat_id: int) -> None:
     task = active_timers.pop(chat_id, None)
     if task and not task.done():
+        # MUHIM: taymer tugagach o'zi send_question() ni chaqiradi, u esa
+        # navbatdagi savol uchun yana _cancel_timer() ni chaqiradi. Agar shu
+        # yerda tekshiruv bo'lmasa, taymer O'ZINI-O'ZI cancel() qilib qo'yadi
+        # (chunki active_timers[chat_id] hali ham shu ishlab turgan taskka
+        # ishora qiladi) — natijada CancelledError chiqib, bot "Vaqt tugadi"
+        # xabaridan keyin keyingi savolga hech qachon o'tmay qotib qoladi.
+        if task is asyncio.current_task():
+            return
         task.cancel()
 
 
